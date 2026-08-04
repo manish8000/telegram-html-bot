@@ -24,7 +24,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     await context.bot.send_message(
         chat_id=chat_id,
-        text="👋 **नमस्ते!**\n\nमुझे कोई भी टेस्ट सीरीज़ फ़ाइल (.html / .txt / .pdf) भेजें।\n- प्रश्नों को **शुद्ध हिंदी** में एक्सट्रेक्ट किया जाएगा।\n- हर **15 सेकंड** में क्विज़ पोल पोस्ट होगा!",
+        text="👋 **नमस्ते!**\n\nमुझे कोई भी टेस्ट सीरीज़ फ़ाइल (.html / .txt / .pdf) भेजें।\n- प्रश्नों को **शुद्ध हिंदी** में एक्सट्रेक्ट किया जाएगा।\n- हर **15 सेकंड** में क्विज़ पोल स्वतः पोस्ट होगा!",
         parse_mode="Markdown"
     )
 
@@ -41,70 +41,70 @@ def extract_text_from_file(file_path):
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
             text = f.read()
 
-    # Extra spaces aur newlines ko clean karein
+    # Extra whitespaces ko remove karna
     cleaned_text = re.sub(r'\s+', ' ', text).strip()
     return cleaned_text
 
-# 3. Groq AI Extraction (Error Proof JSON in Hindi)
+# 3. Groq AI Extraction (Strict Native JSON Mode)
 async def parse_quiz_with_groq(text_content):
     if not client:
         logging.error("GROQ_API_KEY Missing!")
         return []
 
-    # Text ko max 6000 chars par cut kar rahe hain taaki Groq fail na ho
-    safe_text = text_content[:6000]
+    # Chunky text: Max 5000 chars taaki JSON cut na ho
+    safe_text = text_content[:5000]
 
-    system_instruction = (
-        "You are an expert quiz generator. Extract multiple-choice questions from the given text. "
-        "Translate ALL questions, options, and explanations strictly into HINDI (Devanagari script). "
-        "Output MUST be a valid, parseable JSON array of objects without markdown formatting."
+    system_prompt = (
+        "You are a quiz extractor. Extract all multiple choice questions from the text and translate EVERYTHING into HINDI (Devanagari script).\n"
+        "You MUST reply strictly in JSON format as a JSON Object with a key 'quizzes' containing the array of question objects.\n"
+        "Example Schema:\n"
+        "{\n"
+        '  "quizzes": [\n'
+        '    {\n'
+        '      "question": "हिंदी में प्रश्न",\n'
+        '      "options": ["विकल्प 1", "विकल्प 2", "विकल्प 3", "विकल्प 4"],\n'
+        '      "correct_option_id": 0,\n'
+        '      "explanation": "हिंदी में व्याख्या"\n'
+        '    }\n'
+        '  ]\n'
+        "}"
     )
-
-    prompt = f"""
-Convert the following content into a JSON array of quizzes in HINDI.
-
-JSON Format required:
-[
-  {{
-    "question": "हिंदी में प्रश्न",
-    "options": ["विकल्प A", "विकल्प B", "विकल्प C", "विकल्प D"],
-    "correct_option_id": 0,
-    "explanation": "हिंदी में व्याख्या"
-  }}
-]
-
-Content:
-{safe_text}
-"""
 
     try:
         response = client.chat.completions.create(
             messages=[
-                {"role": "system", "content": system_instruction},
-                {"role": "user", "content": prompt}
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Extract quizzes from this content:\n{safe_text}"}
             ],
             model="llama-3.3-70b-versatile",
+            response_format={"type": "json_object"},  # Forces valid JSON response
             temperature=0.1
         )
 
         res_text = response.choices[0].message.content
-        # Markdown cleanup
-        res_text = re.sub(r'```json\s*', '', res_text)
-        res_text = re.sub(r'```\s*', '', res_text)
+        data = json.loads(res_text)
 
-        json_match = re.search(r'\[.*\]', res_text, re.DOTALL)
-        if json_match:
-            return json.loads(json_match.group(0))
-        else:
-            return json.loads(res_text.strip())
-
+        if isinstance(data, dict):
+            return data.get("quizzes", [])
+        elif isinstance(data, list):
+            return data
+            
     except Exception as e:
-        logging.error(f"Groq API Error: {e}")
-        return []
+        logging.error(f"Groq Parsing Error: {e}")
+        # Fallback regex parsing if JSON has minor syntax issues
+        try:
+            match = re.search(r'\{.*\}', res_text, re.DOTALL)
+            if match:
+                data = json.loads(match.group(0))
+                return data.get("quizzes", [])
+        except Exception as inner_e:
+            logging.error(f"Fallback Parse Error: {inner_e}")
 
-# 4. Document Processing & Quiz Posts
+    return []
+
+# 4. Document Processing & Quiz Loop
 async def process_document(bot, chat_id, document):
-    await bot.send_message(chat_id=chat_id, text="📄 फ़ाइल प्राप्त हुई! हिंदी में क्विज़ तैयार हो रहा है...")
+    await bot.send_message(chat_id=chat_id, text="📄 फ़ाइल मिल गई है! हिंदी में क्विज़ तैयार किया जा रहा है...")
 
     file = await bot.get_file(document.file_id)
     file_path = f"temp_{document.file_name}"
@@ -117,7 +117,7 @@ async def process_document(bot, chat_id, document):
         if not quiz_data:
             await bot.send_message(
                 chat_id=chat_id, 
-                text="❌ फ़ाइल से प्रश्न एक्सट्रेक्ट नहीं हो सके। कृपया सही HTML/PDF फ़ाइल भेजें।"
+                text="❌ प्रश्न एक्सट्रेक्ट नहीं हो सके। कृपया सुनिश्चित करें कि फ़ाइल में सही टेक्स्ट/HTML सामग्री है और GROQ_API_KEY सही है।"
             )
             if os.path.exists(file_path):
                 os.remove(file_path)
@@ -126,7 +126,7 @@ async def process_document(bot, chat_id, document):
         total_q = len(quiz_data)
         await bot.send_message(
             chat_id=chat_id, 
-            text=f"🎯 **कुल {total_q} प्रश्न (हिंदी) तैयार हैं!**\n\n⏰ हर **15 सेकंड** में पोल भेजा जाएगा..."
+            text=f"🎯 **कुल {total_q} प्रश्न (हिंदी) तैयार हैं!**\n\n⏰ हर **15 सेकंड** में क्विज़ पोस्ट होगा..."
         )
 
         for idx, q in enumerate(quiz_data, 1):
@@ -152,19 +152,19 @@ async def process_document(bot, chat_id, document):
                 is_anonymous=True
             )
 
-            # 15 seconds delay
+            # 15 SECONDS DELAY
             if idx < total_q:
                 await asyncio.sleep(15)
 
         await bot.send_message(chat_id=chat_id, text="🎉 **क्विज़ समाप्त हो गया है!**")
 
     except Exception as e:
-        await bot.send_message(chat_id=chat_id, text=f"⚠️ त्रुटि: {str(e)}")
+        await bot.send_message(chat_id=chat_id, text=f"⚠️ त्रुटि (Error): {str(e)}")
 
     if os.path.exists(file_path):
         os.remove(file_path)
 
-# 5. Handlers Setup
+# 5. Handlers
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message and update.message.document:
         await process_document(context.bot, update.message.chat_id, update.message.document)
@@ -180,6 +180,6 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
-    print("Bot Live Ho Gaya...")
+    print("Bot is up and running...")
     app.run_polling(drop_pending_updates=True)
-    
+                      
