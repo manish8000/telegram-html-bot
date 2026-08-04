@@ -3,6 +3,7 @@ import logging
 import re
 import asyncio
 import json
+import aiohttp
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from bs4 import BeautifulSoup
@@ -19,16 +20,17 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
+# 1. START COMMAND (Fixes the NameError)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     await context.bot.send_message(
         chat_id=chat_id,
-        text="👋 **Namaste!**\n\nMujhe koi bhi Test Series file (HTML / Text) bhejo. Main Groq AI ka use karke Questions extract karunga aur har **15 Second** mein Quiz Poll post karunga!",
+        text="👋 **Namaste!**\n\nMujhe koi bhi `.html` ya Text/PDF file bhejo:\n- Media files ko download/upload karega.\n- Test Series/Quizzes ko Groq AI se extract karke har **15 Second** mein post karega!",
         parse_mode="Markdown"
     )
 
+# 2. File Extractor & Helper Functions
 def extract_text_from_file(file_path):
-    """File se text extract karna"""
     if file_path.endswith('.html'):
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
             soup = BeautifulSoup(f.read(), 'html.parser')
@@ -40,27 +42,25 @@ def extract_text_from_file(file_path):
             return f.read()
 
 async def parse_quiz_with_groq(text_content):
-    """Groq API (Llama 3) se Questions, Options, Answer aur Explanation extract karna"""
     if not client:
         logging.error("GROQ_API_KEY Missing!")
         return []
 
     prompt = f"""
-    Below is text from a test series document. Extract all multiple-choice questions along with their options, 0-based correct option index, and explanation.
+    Extract multiple-choice questions from this text.
+    Return ONLY a valid JSON Array. Do NOT use markdown code blocks.
     
-    CRITICAL INSTRUCTION: Return ONLY a valid JSON Array of objects. Do NOT include markdown blocks like ```json ... ``` or any commentary.
-    
-    JSON Schema:
+    Format:
     [
       {{
-        "question": "Question text here",
-        "options": ["Option A", "Option B", "Option C", "Option D"],
+        "question": "Question text",
+        "options": ["Option 1", "Option 2", "Option 3", "Option 4"],
         "correct_option_id": 0,
-        "explanation": "Short explanation here (max 200 chars)"
+        "explanation": "Explanation text (max 200 chars)"
       }}
     ]
 
-    Text Content:
+    Text:
     {text_content[:12000]}
     """
 
@@ -82,8 +82,9 @@ async def parse_quiz_with_groq(text_content):
         logging.error(f"Groq API Error: {e}")
     return []
 
-async def process_quiz_document(bot, chat_id, document):
-    await bot.send_message(chat_id=chat_id, text="📄 Document mil gaya! Groq AI se Questions extract ho rahe hain...")
+# 3. Process Document Logic
+async def process_document(bot, chat_id, document):
+    await bot.send_message(chat_id=chat_id, text="📄 Document mil gaya! Process kiya jaa raha hai...")
 
     file = await bot.get_file(document.file_id)
     file_path = f"temp_{document.file_name}"
@@ -91,14 +92,12 @@ async def process_quiz_document(bot, chat_id, document):
 
     try:
         text_content = extract_text_from_file(file_path)
-        
-        # Groq API processing
         quiz_data = await parse_quiz_with_groq(text_content)
 
         if not quiz_data:
             await bot.send_message(
                 chat_id=chat_id, 
-                text="❌ Questions extract nahi ho paaye. Please check karein ki `GROQ_API_KEY` set hai ya nahi."
+                text="❌ Questions extract nahi ho paaye. Ensure karein ki `GROQ_API_KEY` Railway variables mein add hai."
             )
             if os.path.exists(file_path):
                 os.remove(file_path)
@@ -107,19 +106,18 @@ async def process_quiz_document(bot, chat_id, document):
         total_q = len(quiz_data)
         await bot.send_message(
             chat_id=chat_id, 
-            text=f"🎯 **Total {total_q} Questions Extracted!**\n\n⏰ Har **15 Seconds** mein Quiz Poll post hoga..."
+            text=f"🎯 **Total {total_q} Questions Found!**\n\n⏰ Har **15 Seconds** mein quiz post hoga..."
         )
 
-        # Loop through questions with 15 SECONDS delay
         for idx, q in enumerate(quiz_data, 1):
             question_text = f"[{idx}/{total_q}] {q['question']}"
-            
-            options = [str(opt)[:100] for opt in q['options'][:10]] # Max 10 options
+            options = [str(opt)[:100] for opt in q['options'][:10]]
             correct_id = q.get('correct_option_id', 0)
+            
             if not isinstance(correct_id, int) or correct_id >= len(options) or correct_id < 0:
                 correct_id = 0
 
-            explanation = str(q.get('explanation', 'Correct answer selected!'))[:200]
+            explanation = str(q.get('explanation', 'Correct option!'))[:200]
 
             await bot.send_poll(
                 chat_id=chat_id,
@@ -131,11 +129,10 @@ async def process_quiz_document(bot, chat_id, document):
                 is_anonymous=True
             )
 
-            # 15 SECONDS DELAY
             if idx < total_q:
                 await asyncio.sleep(15)
 
-        await bot.send_message(chat_id=chat_id, text="🎉 **Test Series Complete Ho Gayi!**")
+        await bot.send_message(chat_id=chat_id, text="🎉 **Quiz Complete!**")
 
     except Exception as e:
         await bot.send_message(chat_id=chat_id, text=f"⚠️ Error: {str(e)}")
@@ -143,21 +140,23 @@ async def process_quiz_document(bot, chat_id, document):
     if os.path.exists(file_path):
         os.remove(file_path)
 
+# 4. Message Handler
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message and update.message.document:
-        await process_quiz_document(context.bot, update.message.chat_id, update.message.document)
+        await process_document(context.bot, update.message.chat_id, update.message.document)
     elif update.channel_post and update.channel_post.document:
-        await process_quiz_document(context.bot, update.channel_post.chat_id, update.channel_post.document)
+        await process_document(context.bot, update.channel_post.chat_id, update.channel_post.document)
 
 if __name__ == '__main__':
     if not TOKEN:
-        raise ValueError("BOT_TOKEN missing!")
+        raise ValueError("BOT_TOKEN Variable Missing!")
 
     app = ApplicationBuilder().token(TOKEN).build()
 
+    # Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
-    print("Groq Quiz Bot running...")
+    print("Bot is up and running...")
     app.run_polling(drop_pending_updates=True)
     
