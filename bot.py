@@ -13,18 +13,17 @@ logging.basicConfig(
 TOKEN = os.getenv("BOT_TOKEN")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Namaste! Mujhe koi `.html` file bhejo, main usme se text extract karke bhej dunga.")
+    if update.message:
+        await update.message.reply_text("Namaste! Mujhe koi `.html` file bhejo, main usme se text extract karke bhej dunga.")
 
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    document = update.message.document
-    
+async def process_html_file(bot, chat_id, document):
     if not document.file_name.lower().endswith('.html'):
-        await update.message.reply_text("Kripya sirf `.html` extension wali file hi bhejein.")
+        await bot.send_message(chat_id=chat_id, text="Kripya sirf `.html` extension wali file hi bhejein.")
         return
 
-    await update.message.reply_text("File process ho rahi hai, thoda intezar karein...")
+    await bot.send_message(chat_id=chat_id, text="File process ho rahi hai, thoda intezar karein...")
 
-    file = await context.bot.get_file(document.file_id)
+    file = await bot.get_file(document.file_id)
     file_path = f"temp_{document.file_name}"
     await file.download_to_drive(file_path)
 
@@ -40,22 +39,30 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         extracted_text = soup.get_text(separator='\n').strip()
 
         if len(extracted_text) == 0:
-            await update.message.reply_text("Is HTML file mein koi readable text nahi mila.")
+            await bot.send_message(chat_id=chat_id, text="Is HTML file mein koi readable text nahi mila.")
         elif len(extracted_text) > 4000:
             output_file = "extracted_text.txt"
             with open(output_file, 'w', encoding='utf-8') as f:
                 f.write(extracted_text)
-            await update.message.reply_document(document=open(output_file, 'rb'), caption="Extracted Text File:")
+            await bot.send_document(chat_id=chat_id, document=open(output_file, 'rb'), caption="Extracted Text File:")
             if os.path.exists(output_file):
                 os.remove(output_file)
         else:
-            await update.message.reply_text(f"**Extracted Text:**\n\n{extracted_text}", parse_mode="Markdown")
+            await bot.send_message(chat_id=chat_id, text=f"**Extracted Text:**\n\n{extracted_text}", parse_mode="Markdown")
 
     except Exception as e:
-        await update.message.reply_text(f"Error aaya hai: {str(e)}")
+        await bot.send_message(chat_id=chat_id, text=f"Error aaya hai: {str(e)}")
     
     if os.path.exists(file_path):
         os.remove(file_path)
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Direct Messages & Groups
+    if update.message and update.message.document:
+        await process_html_file(context.bot, update.message.chat_id, update.message.document)
+    # Telegram Channels
+    elif update.channel_post and update.channel_post.document:
+        await process_html_file(context.bot, update.channel_post.chat_id, update.channel_post.document)
 
 if __name__ == '__main__':
     if not TOKEN:
@@ -64,7 +71,10 @@ if __name__ == '__main__':
     app = ApplicationBuilder().token(TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    
+    # Message & Channel Post dono filters apply karein
+    doc_filter = filters.Document.ALL
+    app.add_handler(MessageHandler(doc_filter, handle_document))
 
     print("Bot is running successfully...")
     app.run_polling(drop_pending_updates=True)
