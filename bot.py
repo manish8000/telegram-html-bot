@@ -6,6 +6,7 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from bs4 import BeautifulSoup
 
+# Logging setup
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -13,20 +14,33 @@ logging.basicConfig(
 
 TOKEN = os.getenv("BOT_TOKEN")
 
+# 1. Start Function (Jo pehle missing tha)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="👋 **Namaste!**\n\nMujhe koi bhi `.html` file bhejo, main usme se saare **Videos** aur **PDFs** extract karke seedha channel/chat mein upload kar dunga!",
+        parse_mode="Markdown"
+    )
+
+# 2. File Download Helper
 async def download_file(url, file_path):
-    """URL se file download karne ka function"""
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as response:
-            if response.status == 200:
-                with open(file_path, 'wb') as f:
-                    while True:
-                        chunk = await response.content.read(1024 * 1024) # 1MB chunks
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                return True
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=300) as response:
+                if response.status == 200:
+                    with open(file_path, 'wb') as f:
+                        while True:
+                            chunk = await response.content.read(1024 * 1024) # 1MB
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                    return True
+    except Exception as e:
+        logging.error(f"Download Error: {e}")
     return False
 
+# 3. Main Logic
 async def process_html_file(bot, chat_id, document):
     if not document.file_name.lower().endswith('.html'):
         await bot.send_message(chat_id=chat_id, text="⚠️ Kripya sirf `.html` extension wali file hi bhejein.")
@@ -52,14 +66,14 @@ async def process_html_file(bot, chat_id, document):
             if not url or not url.startswith('http'):
                 continue
 
-            # Title Extract Karein
+            # Title extraction
             title = tag.get_text().strip() or tag.get('title') or tag.get('alt')
             if not title and tag.parent:
                 title = tag.parent.get_text().strip()
             if not title:
                 title = "Media File"
 
-            title = re.sub(r'\s+', ' ', title)[:100] # Safe length limit
+            title = re.sub(r'\s+', ' ', title)[:100]
 
             url_lower = url.lower()
             if any(ext in url_lower for ext in ['.mp4', '.mkv']):
@@ -68,13 +82,12 @@ async def process_html_file(bot, chat_id, document):
                 media_items.append({'type': 'pdf', 'url': url, 'title': title})
 
         if not media_items:
-            await bot.send_message(chat_id=chat_id, text="❌ Is HTML file mein koi direct `.mp4` ya `.pdf` downloadable links nahi mile.")
+            await bot.send_message(chat_id=chat_id, text="❌ Is HTML file mein koi downloadable `.mp4` ya `.pdf` links nahi mile.")
             os.remove(html_path)
             return
 
-        await bot.send_message(chat_id=chat_id, text=f"📥 Total {len(media_items)} files mili hain. Download aur Upload process shuru ho raha hai...")
+        await bot.send_message(chat_id=chat_id, text=f"📥 Total {len(media_items)} files mili hain. Processing shuru ho rahi hai...")
 
-        # Process each media file
         for idx, item in enumerate(media_items, 1):
             file_type = item['type']
             url = item['url']
@@ -88,7 +101,7 @@ async def process_html_file(bot, chat_id, document):
             success = await download_file(url, temp_filename)
 
             if success and os.path.exists(temp_filename):
-                await bot.send_message(chat_id=chat_id, text=f"📤 Uploading to channel: {title}...")
+                await bot.send_message(chat_id=chat_id, text=f"📤 Uploading: {title}...")
 
                 with open(temp_filename, 'rb') as f:
                     if file_type == 'video':
@@ -108,16 +121,17 @@ async def process_html_file(bot, chat_id, document):
                         )
                 os.remove(temp_filename)
             else:
-                await bot.send_message(chat_id=chat_id, text=f"❌ Download Fail ho gaya: {title}\n🔗 URL: {url}")
+                await bot.send_message(chat_id=chat_id, text=f"❌ Download Fail: {title}\n🔗 Link: {url}")
 
-        await bot.send_message(chat_id=chat_id, text="✅ Sabhi files processing poori ho gayi hai!")
+        await bot.send_message(chat_id=chat_id, text="✅ Sabhi files processing poori ho gayi!")
 
     except Exception as e:
-        await bot.send_message(chat_id=chat_id, text=f"⚠️ Error aaya: {str(e)}")
+        await bot.send_message(chat_id=chat_id, text=f"⚠️ Error: {str(e)}")
 
     if os.path.exists(html_path):
         os.remove(html_path)
 
+# 4. Message Handler
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message and update.message.document:
         await process_html_file(context.bot, update.message.chat_id, update.message.document)
@@ -129,9 +143,11 @@ if __name__ == '__main__':
         raise ValueError("BOT_TOKEN missing!")
 
     app = ApplicationBuilder().token(TOKEN).build()
+    
+    # Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
-    print("Bot is running...")
+    print("Bot is running successfully...")
     app.run_polling(drop_pending_updates=True)
     
