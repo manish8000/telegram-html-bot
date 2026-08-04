@@ -3,7 +3,6 @@ import logging
 import re
 import asyncio
 import json
-import aiohttp
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from bs4 import BeautifulSoup
@@ -20,71 +19,92 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-# 1. START COMMAND (Fixes the NameError)
+# 1. START COMMAND
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     await context.bot.send_message(
         chat_id=chat_id,
-        text="👋 **Namaste!**\n\nMujhe koi bhi `.html` ya Text/PDF file bhejo:\n- Media files ko download/upload karega.\n- Test Series/Quizzes ko Groq AI se extract karke har **15 Second** mein post karega!",
+        text="👋 **नमस्ते!**\n\nमुझे कोई भी टेस्ट सीरीज़ फ़ाइल (.html / .txt / .pdf) भेजें।\n- प्रश्नों को **शुद्ध हिंदी** में एक्सट्रेक्ट किया जाएगा।\n- हर **15 सेकंड** में क्विज़ पोल पोस्ट होगा!",
         parse_mode="Markdown"
     )
 
-# 2. File Extractor & Helper Functions
+# 2. File Extractor with Clean Text
 def extract_text_from_file(file_path):
+    text = ""
     if file_path.endswith('.html'):
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
             soup = BeautifulSoup(f.read(), 'html.parser')
-            for tag in soup(["script", "style"]):
+            for tag in soup(["script", "style", "nav", "footer", "header"]):
                 tag.extract()
-            return soup.get_text(separator='\n')
+            text = soup.get_text(separator=' ')
     else:
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-            return f.read()
+            text = f.read()
 
+    # Extra spaces aur newlines ko clean karein
+    cleaned_text = re.sub(r'\s+', ' ', text).strip()
+    return cleaned_text
+
+# 3. Groq AI Extraction (Error Proof JSON in Hindi)
 async def parse_quiz_with_groq(text_content):
     if not client:
         logging.error("GROQ_API_KEY Missing!")
         return []
 
-    prompt = f"""
-    Extract multiple-choice questions from this text.
-    Return ONLY a valid JSON Array. Do NOT use markdown code blocks.
-    
-    Format:
-    [
-      {{
-        "question": "Question text",
-        "options": ["Option 1", "Option 2", "Option 3", "Option 4"],
-        "correct_option_id": 0,
-        "explanation": "Explanation text (max 200 chars)"
-      }}
-    ]
+    # Text ko max 6000 chars par cut kar rahe hain taaki Groq fail na ho
+    safe_text = text_content[:6000]
 
-    Text:
-    {text_content[:12000]}
-    """
+    system_instruction = (
+        "You are an expert quiz generator. Extract multiple-choice questions from the given text. "
+        "Translate ALL questions, options, and explanations strictly into HINDI (Devanagari script). "
+        "Output MUST be a valid, parseable JSON array of objects without markdown formatting."
+    )
+
+    prompt = f"""
+Convert the following content into a JSON array of quizzes in HINDI.
+
+JSON Format required:
+[
+  {{
+    "question": "हिंदी में प्रश्न",
+    "options": ["विकल्प A", "विकल्प B", "विकल्प C", "विकल्प D"],
+    "correct_option_id": 0,
+    "explanation": "हिंदी में व्याख्या"
+  }}
+]
+
+Content:
+{safe_text}
+"""
 
     try:
         response = client.chat.completions.create(
             messages=[
-                {"role": "system", "content": "You are a JSON extractor for Telegram quiz generation."},
+                {"role": "system", "content": system_instruction},
                 {"role": "user", "content": prompt}
             ],
             model="llama-3.3-70b-versatile",
-            temperature=0.2,
+            temperature=0.1
         )
 
         res_text = response.choices[0].message.content
+        # Markdown cleanup
+        res_text = re.sub(r'```json\s*', '', res_text)
+        res_text = re.sub(r'```\s*', '', res_text)
+
         json_match = re.search(r'\[.*\]', res_text, re.DOTALL)
         if json_match:
             return json.loads(json_match.group(0))
+        else:
+            return json.loads(res_text.strip())
+
     except Exception as e:
         logging.error(f"Groq API Error: {e}")
-    return []
+        return []
 
-# 3. Process Document Logic
+# 4. Document Processing & Quiz Posts
 async def process_document(bot, chat_id, document):
-    await bot.send_message(chat_id=chat_id, text="📄 Document mil gaya! Process kiya jaa raha hai...")
+    await bot.send_message(chat_id=chat_id, text="📄 फ़ाइल प्राप्त हुई! हिंदी में क्विज़ तैयार हो रहा है...")
 
     file = await bot.get_file(document.file_id)
     file_path = f"temp_{document.file_name}"
@@ -97,7 +117,7 @@ async def process_document(bot, chat_id, document):
         if not quiz_data:
             await bot.send_message(
                 chat_id=chat_id, 
-                text="❌ Questions extract nahi ho paaye. Ensure karein ki `GROQ_API_KEY` Railway variables mein add hai."
+                text="❌ फ़ाइल से प्रश्न एक्सट्रेक्ट नहीं हो सके। कृपया सही HTML/PDF फ़ाइल भेजें।"
             )
             if os.path.exists(file_path):
                 os.remove(file_path)
@@ -106,18 +126,21 @@ async def process_document(bot, chat_id, document):
         total_q = len(quiz_data)
         await bot.send_message(
             chat_id=chat_id, 
-            text=f"🎯 **Total {total_q} Questions Found!**\n\n⏰ Har **15 Seconds** mein quiz post hoga..."
+            text=f"🎯 **कुल {total_q} प्रश्न (हिंदी) तैयार हैं!**\n\n⏰ हर **15 सेकंड** में पोल भेजा जाएगा..."
         )
 
         for idx, q in enumerate(quiz_data, 1):
-            question_text = f"[{idx}/{total_q}] {q['question']}"
-            options = [str(opt)[:100] for opt in q['options'][:10]]
+            question_text = f"[{idx}/{total_q}] {q.get('question', '')}"
+            options = [str(opt)[:100] for opt in q.get('options', [])[:10]]
+
+            if not options or len(options) < 2:
+                continue
+
             correct_id = q.get('correct_option_id', 0)
-            
             if not isinstance(correct_id, int) or correct_id >= len(options) or correct_id < 0:
                 correct_id = 0
 
-            explanation = str(q.get('explanation', 'Correct option!'))[:200]
+            explanation = str(q.get('explanation', 'सही उत्तर gewählt!'))[:200]
 
             await bot.send_poll(
                 chat_id=chat_id,
@@ -129,18 +152,19 @@ async def process_document(bot, chat_id, document):
                 is_anonymous=True
             )
 
+            # 15 seconds delay
             if idx < total_q:
                 await asyncio.sleep(15)
 
-        await bot.send_message(chat_id=chat_id, text="🎉 **Quiz Complete!**")
+        await bot.send_message(chat_id=chat_id, text="🎉 **क्विज़ समाप्त हो गया है!**")
 
     except Exception as e:
-        await bot.send_message(chat_id=chat_id, text=f"⚠️ Error: {str(e)}")
+        await bot.send_message(chat_id=chat_id, text=f"⚠️ त्रुटि: {str(e)}")
 
     if os.path.exists(file_path):
         os.remove(file_path)
 
-# 4. Message Handler
+# 5. Handlers Setup
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message and update.message.document:
         await process_document(context.bot, update.message.chat_id, update.message.document)
@@ -149,14 +173,13 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 if __name__ == '__main__':
     if not TOKEN:
-        raise ValueError("BOT_TOKEN Variable Missing!")
+        raise ValueError("BOT_TOKEN Missing!")
 
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
-    print("Bot is up and running...")
+    print("Bot Live Ho Gaya...")
     app.run_polling(drop_pending_updates=True)
     
