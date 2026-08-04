@@ -1,10 +1,12 @@
 import os
 import logging
 import re
-import aiohttp
+import asyncio
+import json
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from bs4 import BeautifulSoup
+from groq import Groq
 
 # Logging setup
 logging.basicConfig(
@@ -13,141 +15,149 @@ logging.basicConfig(
 )
 
 TOKEN = os.getenv("BOT_TOKEN")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# 1. Start Function (Jo pehle missing tha)
+client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     await context.bot.send_message(
         chat_id=chat_id,
-        text="👋 **Namaste!**\n\nMujhe koi bhi `.html` file bhejo, main usme se saare **Videos** aur **PDFs** extract karke seedha channel/chat mein upload kar dunga!",
+        text="👋 **Namaste!**\n\nMujhe koi bhi Test Series file (HTML / Text) bhejo. Main Groq AI ka use karke Questions extract karunga aur har **15 Second** mein Quiz Poll post karunga!",
         parse_mode="Markdown"
     )
 
-# 2. File Download Helper
-async def download_file(url, file_path):
+def extract_text_from_file(file_path):
+    """File se text extract karna"""
+    if file_path.endswith('.html'):
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            soup = BeautifulSoup(f.read(), 'html.parser')
+            for tag in soup(["script", "style"]):
+                tag.extract()
+            return soup.get_text(separator='\n')
+    else:
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            return f.read()
+
+async def parse_quiz_with_groq(text_content):
+    """Groq API (Llama 3) se Questions, Options, Answer aur Explanation extract karna"""
+    if not client:
+        logging.error("GROQ_API_KEY Missing!")
+        return []
+
+    prompt = f"""
+    Below is text from a test series document. Extract all multiple-choice questions along with their options, 0-based correct option index, and explanation.
+    
+    CRITICAL INSTRUCTION: Return ONLY a valid JSON Array of objects. Do NOT include markdown blocks like ```json ... ``` or any commentary.
+    
+    JSON Schema:
+    [
+      {{
+        "question": "Question text here",
+        "options": ["Option A", "Option B", "Option C", "Option D"],
+        "correct_option_id": 0,
+        "explanation": "Short explanation here (max 200 chars)"
+      }}
+    ]
+
+    Text Content:
+    {text_content[:12000]}
+    """
+
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=300) as response:
-                if response.status == 200:
-                    with open(file_path, 'wb') as f:
-                        while True:
-                            chunk = await response.content.read(1024 * 1024) # 1MB
-                            if not chunk:
-                                break
-                            f.write(chunk)
-                    return True
+        response = client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": "You are a JSON extractor for Telegram quiz generation."},
+                {"role": "user", "content": prompt}
+            ],
+            model="llama-3.3-70b-versatile",
+            temperature=0.2,
+        )
+
+        res_text = response.choices[0].message.content
+        json_match = re.search(r'\[.*\]', res_text, re.DOTALL)
+        if json_match:
+            return json.loads(json_match.group(0))
     except Exception as e:
-        logging.error(f"Download Error: {e}")
-    return False
+        logging.error(f"Groq API Error: {e}")
+    return []
 
-# 3. Main Logic
-async def process_html_file(bot, chat_id, document):
-    if not document.file_name.lower().endswith('.html'):
-        await bot.send_message(chat_id=chat_id, text="⚠️ Kripya sirf `.html` extension wali file hi bhejein.")
-        return
-
-    await bot.send_message(chat_id=chat_id, text="🔍 HTML File scan ho rahi hai...")
+async def process_quiz_document(bot, chat_id, document):
+    await bot.send_message(chat_id=chat_id, text="📄 Document mil gaya! Groq AI se Questions extract ho rahe hain...")
 
     file = await bot.get_file(document.file_id)
-    html_path = f"temp_{document.file_name}"
-    await file.download_to_drive(html_path)
+    file_path = f"temp_{document.file_name}"
+    await file.download_to_drive(file_path)
 
     try:
-        with open(html_path, 'r', encoding='utf-8') as f:
-            html_content = f.read()
+        text_content = extract_text_from_file(file_path)
+        
+        # Groq API processing
+        quiz_data = await parse_quiz_with_groq(text_content)
 
-        soup = BeautifulSoup(html_content, 'html.parser')
-        tags = soup.find_all(['a', 'video', 'source', 'iframe'])
-
-        media_items = []
-
-        for tag in tags:
-            url = tag.get('href') or tag.get('src')
-            if not url or not url.startswith('http'):
-                continue
-
-            # Title extraction
-            title = tag.get_text().strip() or tag.get('title') or tag.get('alt')
-            if not title and tag.parent:
-                title = tag.parent.get_text().strip()
-            if not title:
-                title = "Media File"
-
-            title = re.sub(r'\s+', ' ', title)[:100]
-
-            url_lower = url.lower()
-            if any(ext in url_lower for ext in ['.mp4', '.mkv']):
-                media_items.append({'type': 'video', 'url': url, 'title': title})
-            elif '.pdf' in url_lower:
-                media_items.append({'type': 'pdf', 'url': url, 'title': title})
-
-        if not media_items:
-            await bot.send_message(chat_id=chat_id, text="❌ Is HTML file mein koi downloadable `.mp4` ya `.pdf` links nahi mile.")
-            os.remove(html_path)
+        if not quiz_data:
+            await bot.send_message(
+                chat_id=chat_id, 
+                text="❌ Questions extract nahi ho paaye. Please check karein ki `GROQ_API_KEY` set hai ya nahi."
+            )
+            if os.path.exists(file_path):
+                os.remove(file_path)
             return
 
-        await bot.send_message(chat_id=chat_id, text=f"📥 Total {len(media_items)} files mili hain. Processing shuru ho rahi hai...")
+        total_q = len(quiz_data)
+        await bot.send_message(
+            chat_id=chat_id, 
+            text=f"🎯 **Total {total_q} Questions Extracted!**\n\n⏰ Har **15 Seconds** mein Quiz Poll post hoga..."
+        )
 
-        for idx, item in enumerate(media_items, 1):
-            file_type = item['type']
-            url = item['url']
-            title = item['title']
+        # Loop through questions with 15 SECONDS delay
+        for idx, q in enumerate(quiz_data, 1):
+            question_text = f"[{idx}/{total_q}] {q['question']}"
+            
+            options = [str(opt)[:100] for opt in q['options'][:10]] # Max 10 options
+            correct_id = q.get('correct_option_id', 0)
+            if not isinstance(correct_id, int) or correct_id >= len(options) or correct_id < 0:
+                correct_id = 0
 
-            ext = ".mp4" if file_type == "video" else ".pdf"
-            temp_filename = f"downloaded_{idx}{ext}"
+            explanation = str(q.get('explanation', 'Correct answer selected!'))[:200]
 
-            await bot.send_message(chat_id=chat_id, text=f"⏳ [{idx}/{len(media_items)}] Downloading: {title}...")
+            await bot.send_poll(
+                chat_id=chat_id,
+                question=question_text[:300],
+                options=options,
+                type="quiz",
+                correct_option_id=correct_id,
+                explanation=explanation,
+                is_anonymous=True
+            )
 
-            success = await download_file(url, temp_filename)
+            # 15 SECONDS DELAY
+            if idx < total_q:
+                await asyncio.sleep(15)
 
-            if success and os.path.exists(temp_filename):
-                await bot.send_message(chat_id=chat_id, text=f"📤 Uploading: {title}...")
-
-                with open(temp_filename, 'rb') as f:
-                    if file_type == 'video':
-                        await bot.send_video(
-                            chat_id=chat_id,
-                            video=f,
-                            caption=f"🎥 **{title}**",
-                            parse_mode="Markdown",
-                            supports_streaming=True
-                        )
-                    else:
-                        await bot.send_document(
-                            chat_id=chat_id,
-                            document=f,
-                            caption=f"📄 **{title}**",
-                            parse_mode="Markdown"
-                        )
-                os.remove(temp_filename)
-            else:
-                await bot.send_message(chat_id=chat_id, text=f"❌ Download Fail: {title}\n🔗 Link: {url}")
-
-        await bot.send_message(chat_id=chat_id, text="✅ Sabhi files processing poori ho gayi!")
+        await bot.send_message(chat_id=chat_id, text="🎉 **Test Series Complete Ho Gayi!**")
 
     except Exception as e:
         await bot.send_message(chat_id=chat_id, text=f"⚠️ Error: {str(e)}")
 
-    if os.path.exists(html_path):
-        os.remove(html_path)
+    if os.path.exists(file_path):
+        os.remove(file_path)
 
-# 4. Message Handler
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message and update.message.document:
-        await process_html_file(context.bot, update.message.chat_id, update.message.document)
+        await process_quiz_document(context.bot, update.message.chat_id, update.message.document)
     elif update.channel_post and update.channel_post.document:
-        await process_html_file(context.bot, update.channel_post.chat_id, update.channel_post.document)
+        await process_quiz_document(context.bot, update.channel_post.chat_id, update.channel_post.document)
 
 if __name__ == '__main__':
     if not TOKEN:
         raise ValueError("BOT_TOKEN missing!")
 
     app = ApplicationBuilder().token(TOKEN).build()
-    
-    # Handlers
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
-    print("Bot is running successfully...")
+    print("Groq Quiz Bot running...")
     app.run_polling(drop_pending_updates=True)
     
