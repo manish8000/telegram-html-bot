@@ -3,14 +3,16 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from bs4 import BeautifulSoup
 
+# Railway variable se token fetch karega
 TOKEN = os.getenv("BOT_TOKEN")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Namaste! Mujhe koi `.html` file bhejo, main text extract karke bhej dunga.")
+    await update.message.reply_text("Namaste! Mujhe koi `.html` file bhejo, main usme se sara text extract karke bhej dunga.")
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     document = update.message.document
     
+    # Check karein ki file HTML hai ya nahi
     if not document.file_name.endswith('.html'):
         await update.message.reply_text("Kripya sirf `.html` extension wali file hi bhejein.")
         return
@@ -27,6 +29,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         soup = BeautifulSoup(html_content, 'html.parser')
         
+        # Script aur CSS styles hata dein
         for script in soup(["script", "style"]):
             script.extract()
 
@@ -55,6 +58,6 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
-    print("Bot running...")
+    print("Bot is running...")
     app.run_polling()
-  
+    
